@@ -45,7 +45,7 @@ func main() {
 		},
 	}
 
-	privateBytes, err := os.ReadFile("pc_ssh")
+	privateBytes, err := os.ReadFile("./testfiles/pc_ssh")
 	if err != nil {
 		log.Fatal("Failed to load private key", err)
 	}
@@ -101,6 +101,7 @@ func main() {
 		// Sessions have out-of-band requests such as "shell",
 		// "pty-req" and "env".  Here we handle only the
 		// "subsystem" request.
+		// command to connect to server is sftp
 		go func(in <-chan *ssh.Request) {
 			for req := range in {
 				fmt.Fprintf(debugStream, "Request: %v\n", req.Type)
