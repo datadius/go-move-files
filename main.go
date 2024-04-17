@@ -1,24 +1,104 @@
 package main
 
+// An example Bubble Tea server. This will put an ssh session into alt screen
+// and continually print up to date terminal information.
+
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/log"
+	"github.com/charmbracelet/ssh"
+	"github.com/charmbracelet/wish"
+	"github.com/charmbracelet/wish/activeterm"
+	"github.com/charmbracelet/wish/bubbletea"
+	"github.com/charmbracelet/wish/logging"
 )
 
-type model struct {
-	choices  []string
-	cursor   int
-	selected map[int]struct{}
+const (
+	host = "localhost"
+	port = "2022"
+)
+
+func main() {
+	server, err := wish.NewServer(
+		wish.WithAddress(net.JoinHostPort(host, port)),
+		wish.WithHostKeyPath("./filemover/testfiles/pc_ssh"),
+		wish.WithMiddleware(
+			bubbletea.Middleware(teaHandler),
+			activeterm.Middleware(), // Bubble Tea apps usually require a PTY. TODO: Find what PTY is
+			logging.Middleware(),
+		),
+	)
+	if err != nil {
+		log.Error("Count not start server", "error", err)
+	}
+
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	log.Info("Starting SSH server", "host", host, "port", port)
+	go func() {
+		if err = server.ListenAndServe(); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
+			log.Error("Could not start server", "error", err)
+			done <- nil
+		}
+	}()
+
+	<-done
+	log.Info("Stopping SSH Server")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer func() { cancel() }()
+	if err := server.Shutdown(ctx); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
+		log.Error("Count not stop server", "error", err)
+	}
 }
 
-func initialModel() model {
-	return model{
-		choices: []string{"Buy carrots", "Buy celery", "Buy kohlrabi"},
+// You can wire any Bubble Tea model up to the middleware with a function that
+// handles the incoming ssh.Session. Here we just grab the terminal info and
+// pass it to the new model. You can also return tea.ProgramOptions (such as
+// tea.WithAltScreen) on a session by session basis.
+func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
+	// This should never fail, as we are using the activeterm middleware.
+	pty, _, _ := s.Pty()
 
-		selected: make(map[int]struct{}),
+	// When running a Bubble Tea app over SSH, you shouldn't use the default
+	// lipgloss.NewStyle function.
+	// That function will use the color profile from the os.Stdin, which is the
+	// server, not the client.
+	// We provide a MakeRenderer function in the bubbletea middleware package,
+	// so you can easily get the correct renderer for the current session, and
+	// use it to create the styles.
+	// The recommended way to use these styles is to then pass them down to
+	// your Bubble Tea model.
+	renderer := bubbletea.MakeRenderer(s)
+	txtStyle := renderer.NewStyle().Foreground(lipgloss.Color("10"))
+	quitStyle := renderer.NewStyle().Foreground(lipgloss.Color("8"))
+
+	m := model{
+		term:      pty.Term,
+		width:     pty.Window.Width,
+		height:    pty.Window.Height,
+		txtStyle:  txtStyle,
+		quitStyle: quitStyle,
 	}
+	return m, []tea.ProgramOption{tea.WithAltScreen()}
+}
+
+// Just a generic tea.Model to demo terminal information of ssh.
+type model struct {
+	term      string
+	width     int
+	height    int
+	txtStyle  lipgloss.Style
+	quitStyle lipgloss.Style
 }
 
 func (m model) Init() tea.Cmd {
@@ -27,64 +107,19 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-
+	case tea.WindowSizeMsg:
+		m.height = msg.Height
+		m.width = msg.Width
 	case tea.KeyMsg:
-
 		switch msg.String() {
-
-		case "ctrl+c", "q":
+		case "q", "ctrl+c":
 			return m, tea.Quit
-
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-
-		case "down", "j":
-			if m.cursor < len(m.choices)-1 {
-				m.cursor++
-			}
-
-		case "enter", " ":
-			_, ok := m.selected[m.cursor]
-			if ok {
-				delete(m.selected, m.cursor)
-			} else {
-				m.selected[m.cursor] = struct{}{}
-			}
 		}
 	}
-
 	return m, nil
 }
 
 func (m model) View() string {
-	s := "What should we buy at the market?\n"
-
-	for i, choice := range m.choices {
-
-		cursor := " "
-		if m.cursor == i {
-			cursor = ">"
-		}
-
-		checked := " "
-		if _, ok := m.selected[i]; ok {
-			checked = "x"
-		}
-
-		s += fmt.Sprintf("%s [%s] %s\n", cursor, checked, choice)
-	}
-
-	s += "\nPress q to quit.\n"
-
-	return s
-}
-
-func main() {
-	p := tea.NewProgram(initialModel())
-	if _, err := p.Run(); err != nil {
-		fmt.Printf("Alas, there's been an error: %v", err)
-		os.Exit(1)
-	}
+	s := fmt.Sprintf("Your term is %s\nYour window size is %dx%d", m.term, m.width, m.height)
+	return m.txtStyle.Render(s) + "\n\n" + m.quitStyle.Render("Press 'q' to quit\n")
 }
