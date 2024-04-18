@@ -6,10 +6,12 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,10 +30,22 @@ const (
 	port = "2022"
 )
 
+var (
+	files_list []string
+)
+
 func main() {
+	files_flag := flag.String("f", "", "List of files to move")
+	flag.Parse()
+	files_list = strings.Split(*files_flag, ",")
+	log.Print("Files to move: ", files_list)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	server, err := wish.NewServer(
 		wish.WithAddress(net.JoinHostPort(host, port)),
-		wish.WithHostKeyPath("./filemover/testfiles/pc_ssh"),
+		wish.WithPasswordAuth(func(ctx ssh.Context, password string) bool {
+			return password == "tiger"
+		}),
 		wish.WithMiddleware(
 			bubbletea.Middleware(teaHandler),
 			activeterm.Middleware(), // Bubble Tea apps usually require a PTY. TODO: Find what PTY is
@@ -54,7 +68,6 @@ func main() {
 
 	<-done
 	log.Info("Stopping SSH Server")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer func() { cancel() }()
 	if err := server.Shutdown(ctx); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
 		log.Error("Count not stop server", "error", err)
@@ -66,8 +79,19 @@ func main() {
 // pass it to the new model. You can also return tea.ProgramOptions (such as
 // tea.WithAltScreen) on a session by session basis.
 func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
-	// This should never fail, as we are using the activeterm middleware.
-	pty, _, _ := s.Pty()
+	files, err := os.ReadDir(".")
+	if err != nil {
+		log.Fatal("Unable to read dir", "error", err)
+	}
+
+	choices := make([]string, 0)
+	for _, file := range files {
+		for _, file_name := range files_list {
+			if file_name == file.Name() {
+				choices = append(choices, file.Name())
+			}
+		}
+	}
 
 	// When running a Bubble Tea app over SSH, you shouldn't use the default
 	// lipgloss.NewStyle function.
@@ -83,9 +107,9 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 	quitStyle := renderer.NewStyle().Foreground(lipgloss.Color("8"))
 
 	m := model{
-		term:      pty.Term,
-		width:     pty.Window.Width,
-		height:    pty.Window.Height,
+		choices:   choices,
+		cursor:    0,
+		selected:  make(map[int]struct{}),
 		txtStyle:  txtStyle,
 		quitStyle: quitStyle,
 	}
@@ -94,9 +118,9 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 
 // Just a generic tea.Model to demo terminal information of ssh.
 type model struct {
-	term      string
-	width     int
-	height    int
+	choices   []string
+	cursor    int
+	selected  map[int]struct{}
 	txtStyle  lipgloss.Style
 	quitStyle lipgloss.Style
 }
@@ -107,19 +131,54 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.height = msg.Height
-		m.width = msg.Width
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "down", "j":
+			if m.cursor < len(m.choices)-1 {
+				m.cursor++
+			}
+		case "enter", " ":
+			_, ok := m.selected[m.cursor]
+			if ok {
+				delete(m.selected, m.cursor)
+			} else {
+				m.selected[m.cursor] = struct{}{}
+			}
 		}
 	}
 	return m, nil
 }
 
 func (m model) View() string {
-	s := fmt.Sprintf("Your term is %s\nYour window size is %dx%d", m.term, m.width, m.height)
-	return m.txtStyle.Render(s) + "\n\n" + m.quitStyle.Render("Press 'q' to quit\n")
+	string_view := "These are your options\n"
+	// Iterate over our choices
+	for i, choice := range m.choices {
+
+		// Is the cursor pointing at this choice?
+		cursor := " " // no cursor
+		if m.cursor == i {
+			cursor = ">" // cursor!
+		}
+
+		// Is this choice selected?
+		checked := " " // not selected
+		if _, ok := m.selected[i]; ok {
+			checked = "x" // selected!
+		}
+
+		// Render the row
+		string_view += fmt.Sprintf("%s [%s] %s\n", cursor, checked, choice)
+	}
+
+	// The footer
+	string_view += "\nPress q to quit.\n"
+
+	// Send the UI for rendering
+	return string_view
 }
