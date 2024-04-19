@@ -8,9 +8,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +26,7 @@ import (
 	"github.com/charmbracelet/wish/activeterm"
 	"github.com/charmbracelet/wish/bubbletea"
 	"github.com/charmbracelet/wish/logging"
+	"github.com/pkg/sftp"
 )
 
 const (
@@ -43,9 +47,11 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	server, err := wish.NewServer(
 		wish.WithAddress(net.JoinHostPort(host, port)),
+		wish.WithHostKeyPath("./.ssh/id_ed25519"),
 		wish.WithPasswordAuth(func(ctx ssh.Context, password string) bool {
 			return password == "tiger"
 		}),
+		wish.WithSubsystem("sftp", sftpSubsystem(".")),
 		wish.WithMiddleware(
 			bubbletea.Middleware(teaHandler),
 			activeterm.Middleware(), // Bubble Tea apps usually require a PTY. TODO: Find what PTY is
@@ -71,6 +77,107 @@ func main() {
 	defer func() { cancel() }()
 	if err := server.Shutdown(ctx); err != nil && !errors.Is(err, ssh.ErrServerClosed) {
 		log.Error("Count not stop server", "error", err)
+	}
+}
+
+func sftpSubsystem(root string) ssh.SubsystemHandler {
+	return func(s ssh.Session) {
+		log.Info("sftp", "root", root)
+		fs := &sftpHandler{root}
+		srv := sftp.NewRequestServer(s, sftp.Handlers{
+			FileList: fs,
+			FileGet:  fs,
+		})
+		if err := srv.Serve(); err == io.EOF {
+			if err := srv.Close(); err != nil {
+				wish.Fatalln(s, "sftp:", err)
+			}
+		} else if err != nil {
+			wish.Fatalln(s, "sftp:", err)
+		}
+	}
+}
+
+type sftpHandler struct {
+	root string
+}
+
+var (
+	_ sftp.FileLister = &sftpHandler{}
+	_ sftp.FileReader = &sftpHandler{}
+)
+
+type listerAt []fs.FileInfo
+
+func (l listerAt) ListAt(ls []fs.FileInfo, offset int64) (int, error) {
+	if offset >= int64(len(l)) {
+		return 0, io.EOF
+	}
+	n := copy(ls, l[offset:])
+	if n < len(ls) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+// Fileread implements sftp.FileReader.
+func (s *sftpHandler) Fileread(r *sftp.Request) (io.ReaderAt, error) {
+	var flags int
+	pflags := r.Pflags()
+	if pflags.Append {
+		flags |= os.O_APPEND
+	}
+	if pflags.Creat {
+		flags |= os.O_CREATE
+	}
+	if pflags.Excl {
+		flags |= os.O_EXCL
+	}
+	if pflags.Trunc {
+		flags |= os.O_TRUNC
+	}
+
+	if pflags.Read && pflags.Write {
+		flags |= os.O_RDWR
+	} else if pflags.Read {
+		flags |= os.O_RDONLY
+	} else if pflags.Write {
+		flags |= os.O_WRONLY
+	}
+
+	f, err := os.OpenFile(filepath.Join(s.root, r.Filepath), flags, 0600)
+	if err != nil {
+		return nil, err
+	}
+
+	return f, nil
+}
+
+// Filelist implements sftp.FileLister.
+func (s *sftpHandler) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
+	switch r.Method {
+	case "List":
+		entries, err := os.ReadDir(filepath.Join(s.root, r.Filepath))
+		if err != nil {
+			return nil, fmt.Errorf("sftp: %w", err)
+		}
+		infos := make([]fs.FileInfo, len(entries))
+		for i, entry := range entries {
+			info, err := entry.Info()
+			if err != nil {
+				return nil, err
+			}
+			infos[i] = info
+		}
+		return listerAt(infos), nil
+	case "Stat":
+		fi, err := os.Stat(filepath.Join(s.root, r.Filepath))
+		if err != nil {
+			return nil, err
+		}
+		return listerAt{fi}, nil
+	default:
+		return nil, sftp.ErrSSHFxOpUnsupported
 	}
 }
 
@@ -107,26 +214,67 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 	quitStyle := renderer.NewStyle().Foreground(lipgloss.Color("8"))
 
 	m := model{
-		choices:   choices,
-		cursor:    0,
-		selected:  make(map[int]struct{}),
-		txtStyle:  txtStyle,
-		quitStyle: quitStyle,
+		session:      s,
+		sendingFiles: false,
+		sentFiles:    false,
+		choices:      choices,
+		cursor:       0,
+		selected:     make(map[int]string),
+		txtStyle:     txtStyle,
+		quitStyle:    quitStyle,
 	}
 	return m, []tea.ProgramOption{tea.WithAltScreen()}
 }
 
 // Just a generic tea.Model to demo terminal information of ssh.
 type model struct {
-	choices   []string
-	cursor    int
-	selected  map[int]struct{}
-	txtStyle  lipgloss.Style
-	quitStyle lipgloss.Style
+	session      ssh.Session
+	sendingFiles bool
+	sentFiles    bool
+	choices      []string
+	cursor       int
+	selected     map[int]string
+	txtStyle     lipgloss.Style
+	quitStyle    lipgloss.Style
 }
 
 func (m model) Init() tea.Cmd {
 	return nil
+}
+
+type filesSent string
+
+func SendFiles(session ssh.Session, selectedFiles map[int]string) tea.Cmd {
+	return func() tea.Msg {
+		// 1. https://github.com/charmbracelet/wish/blob/a75952d54861f02d89aa9b06bbf070183a760ae7/examples/scp/main.go
+		// 2. https://github.com/charmbracelet/wish/blob/v1.4.0/scp/scp.go
+		// 3. https://github.com/charmbracelet/wish/blob/main/scp/copy_to_client.go#L10
+		// 4. https://github.com/charmbracelet/wish/blob/a75952d54861f02d89aa9b06bbf070183a760ae7/scp/fs.go#L12
+		// 5. https://github.com/charmbracelet/wish/blob/main/scp/scp.go#L149
+		// 6. https://github.com/charmbracelet/wish/blob/main/scp/scp.go#L115
+
+		// for key, file := range selectedFiles {
+		// 	log.Info("Sending file", "key", key, "file", file)
+		// 	fileReader, err := os.Open(file)
+		// 	if err != nil {
+		// 		return filesSent("Error opening file")
+		// 	}
+		// 	defer fileReader.Close()
+
+		// 	_, err = io.Copy(session, fileReader)
+		// 	if err != nil {
+		// 		return filesSent("Error sending file")
+		// 	}
+
+		// 	if _, err := session.Write([]byte{'\x00'}); err != nil {
+		// 		return filesSent("Error sending file")
+		// 	}
+
+		// }
+
+		return filesSent("Files sent")
+
+	}
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -148,14 +296,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if ok {
 				delete(m.selected, m.cursor)
 			} else {
-				m.selected[m.cursor] = struct{}{}
+				m.selected[m.cursor] = m.choices[m.cursor]
 			}
+		case "r":
+			m.sendingFiles = true
+			return m, SendFiles(m.session, m.selected)
 		}
+	case filesSent:
+		m.sendingFiles = false
+		m.sentFiles = true
 	}
 	return m, nil
 }
 
 func (m model) View() string {
+	if m.sendingFiles {
+		return "Sending files..."
+	} else if m.sentFiles {
+		return "Files sent\nPress q to quit.\n"
+	}
+
 	string_view := "These are your options\n"
 	// Iterate over our choices
 	for i, choice := range m.choices {
@@ -177,7 +337,7 @@ func (m model) View() string {
 	}
 
 	// The footer
-	string_view += "\nPress q to quit.\n"
+	string_view += "\nPress q to quit.\nPress r to receive selected files.\n"
 
 	// Send the UI for rendering
 	return string_view
