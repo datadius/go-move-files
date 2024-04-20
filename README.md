@@ -9,3 +9,5 @@ The user will have a command to receive the data, where a TUI will open to illus
 The first middleware will handle setting up the upload.
 
 The second middleware will handle the TUI.
+
+Another idea would be to have the current setup as the server and create a client version that connects and the TUI server illustrates what is being done with the data.
