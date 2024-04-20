@@ -26,6 +26,7 @@ import (
 	"github.com/charmbracelet/wish/activeterm"
 	"github.com/charmbracelet/wish/bubbletea"
 	"github.com/charmbracelet/wish/logging"
+	"github.com/charmbracelet/wish/scp"
 	"github.com/pkg/sftp"
 )
 
@@ -43,6 +44,8 @@ func main() {
 	flag.Parse()
 	files_list = strings.Split(*files_flag, ",")
 	log.Print("Files to move: ", files_list)
+	root, _ := filepath.Abs(".")
+	handler := scp.NewFileSystemHandler(root)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	server, err := wish.NewServer(
@@ -51,8 +54,9 @@ func main() {
 		wish.WithPasswordAuth(func(ctx ssh.Context, password string) bool {
 			return password == "tiger"
 		}),
-		wish.WithSubsystem("sftp", sftpSubsystem(".")),
+		wish.WithSubsystem("sftp", sftpSubsystem(root)),
 		wish.WithMiddleware(
+			scp.Middleware(handler, handler),
 			bubbletea.Middleware(teaHandler),
 			activeterm.Middleware(), // Bubble Tea apps usually require a PTY. TODO: Find what PTY is
 			logging.Middleware(),
@@ -271,6 +275,23 @@ func SendFiles(session ssh.Session, selectedFiles map[int]string) tea.Cmd {
 		// 	}
 
 		// }
+
+		for key, file := range selectedFiles {
+			log.Info("Sending file", "key", key, "file", file)
+
+			root, _ := filepath.Abs(".")
+			handler := scp.NewFileSystemHandler(root)
+
+			entry, closer, err := handler.NewFileEntry(session, file)
+			if err != nil {
+				return filesSent("Error opening file")
+			}
+			defer closer()
+
+			if err := entry.Write(session); err != nil {
+				return filesSent("Error sending file")
+			}
+		}
 
 		return filesSent("Files sent")
 
