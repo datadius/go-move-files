@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	scpClient "github.com/bramvdbogaerde/go-scp"
+	"github.com/bramvdbogaerde/go-scp/auth"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
@@ -28,6 +30,7 @@ import (
 	"github.com/charmbracelet/wish/logging"
 	"github.com/charmbracelet/wish/scp"
 	"github.com/pkg/sftp"
+	sshClient "golang.org/x/crypto/ssh"
 )
 
 const (
@@ -44,7 +47,7 @@ func main() {
 	flag.Parse()
 	files_list = strings.Split(*files_flag, ",")
 	log.Print("Files to move: ", files_list)
-	root, _ := filepath.Abs(".")
+	root, _ := filepath.Abs("./testdata/")
 	handler := scp.NewFileSystemHandler(root)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -56,9 +59,9 @@ func main() {
 		}),
 		wish.WithSubsystem("sftp", sftpSubsystem(root)),
 		wish.WithMiddleware(
-			scp.Middleware(handler, handler),
 			bubbletea.Middleware(teaHandler),
 			activeterm.Middleware(), // Bubble Tea apps usually require a PTY. TODO: Find what PTY is
+			scp.Middleware(handler, handler),
 			logging.Middleware(),
 		),
 	)
@@ -190,7 +193,7 @@ func (s *sftpHandler) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 // pass it to the new model. You can also return tea.ProgramOptions (such as
 // tea.WithAltScreen) on a session by session basis.
 func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
-	files, err := os.ReadDir(".")
+	files, err := os.ReadDir("./testdata/")
 	if err != nil {
 		log.Fatal("Unable to read dir", "error", err)
 	}
@@ -279,18 +282,41 @@ func SendFiles(session ssh.Session, selectedFiles map[int]string) tea.Cmd {
 		for key, file := range selectedFiles {
 			log.Info("Sending file", "key", key, "file", file)
 
-			root, _ := filepath.Abs(".")
-			handler := scp.NewFileSystemHandler(root)
-
-			entry, closer, err := handler.NewFileEntry(session, file)
+			clientConfig, err := auth.PasswordKey(
+				"claud",
+				"localpassword",
+				sshClient.InsecureIgnoreHostKey(),
+			)
 			if err != nil {
+				log.Print("Failed to create config: ", err)
+				return filesSent("Error creating config")
+			}
+
+			client := scpClient.NewClient("localhost:22", &clientConfig)
+
+			err = client.Connect()
+			if err != nil {
+				log.Print("Failed to connect: ", err)
+				return filesSent("Error connecting")
+			}
+
+			f, err := os.Open("./testdata/hello.txt")
+			if err != nil {
+				log.Print("Failed to open: ", err)
 				return filesSent("Error opening file")
 			}
-			defer closer()
 
-			if err := entry.Write(session); err != nil {
-				return filesSent("Error sending file")
+			defer client.Close()
+
+			defer f.Close()
+
+			// if the connection requires a PTY, then it will not work
+			err = client.CopyFile(context.Background(), f, "hello.txt", "0655")
+			if err != nil {
+				log.Print("Failed to copy: ", err)
+				return filesSent("Error copying file")
 			}
+
 		}
 
 		return filesSent("Files sent")
