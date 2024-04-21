@@ -253,69 +253,9 @@ type filesSent string
 
 func SendFiles(session ssh.Session, selectedFiles map[int]string) tea.Cmd {
 	return func() tea.Msg {
-		// 1. https://github.com/charmbracelet/wish/blob/a75952d54861f02d89aa9b06bbf070183a760ae7/examples/scp/main.go
-		// 2. https://github.com/charmbracelet/wish/blob/v1.4.0/scp/scp.go
-		// 3. https://github.com/charmbracelet/wish/blob/main/scp/copy_to_client.go#L10
-		// 4. https://github.com/charmbracelet/wish/blob/a75952d54861f02d89aa9b06bbf070183a760ae7/scp/fs.go#L12
-		// 5. https://github.com/charmbracelet/wish/blob/main/scp/scp.go#L149
-		// 6. https://github.com/charmbracelet/wish/blob/main/scp/scp.go#L115
-
-		// for key, file := range selectedFiles {
-		// 	log.Info("Sending file", "key", key, "file", file)
-		// 	fileReader, err := os.Open(file)
-		// 	if err != nil {
-		// 		return filesSent("Error opening file")
-		// 	}
-		// 	defer fileReader.Close()
-
-		// 	_, err = io.Copy(session, fileReader)
-		// 	if err != nil {
-		// 		return filesSent("Error sending file")
-		// 	}
-
-		// 	if _, err := session.Write([]byte{'\x00'}); err != nil {
-		// 		return filesSent("Error sending file")
-		// 	}
-
-		// }
 
 		for key, file := range selectedFiles {
 			log.Info("Sending file", "key", key, "file", file)
-
-			clientConfig, err := auth.PasswordKey(
-				"claud",
-				"localpassword",
-				sshClient.InsecureIgnoreHostKey(),
-			)
-			if err != nil {
-				log.Print("Failed to create config: ", err)
-				return filesSent("Error creating config")
-			}
-
-			client := scpClient.NewClient("localhost:22", &clientConfig)
-
-			err = client.Connect()
-			if err != nil {
-				log.Print("Failed to connect: ", err)
-				return filesSent("Error connecting")
-			}
-
-			f, err := os.Open("./testdata/hello.txt")
-			if err != nil {
-				log.Print("Failed to open: ", err)
-				return filesSent("Error opening file")
-			}
-
-			defer client.Close()
-
-			defer f.Close()
-
-			// if the connection requires a PTY, then it will not work
-			err = client.CopyFile(context.Background(), f, "hello.txt", "0655")
-			if err != nil {
-				log.Print("Failed to copy: ", err)
-				return filesSent("Error copying file")
-			}
 
 		}
 
