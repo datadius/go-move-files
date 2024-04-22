@@ -18,8 +18,6 @@ import (
 	"syscall"
 	"time"
 
-	scpClient "github.com/bramvdbogaerde/go-scp"
-	"github.com/bramvdbogaerde/go-scp/auth"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
@@ -30,7 +28,6 @@ import (
 	"github.com/charmbracelet/wish/logging"
 	"github.com/charmbracelet/wish/scp"
 	"github.com/pkg/sftp"
-	sshClient "golang.org/x/crypto/ssh"
 )
 
 const (
@@ -62,7 +59,7 @@ func main() {
 			bubbletea.Middleware(teaHandler),
 			activeterm.Middleware(), // Bubble Tea apps usually require a PTY. TODO: Find what PTY is
 			scp.Middleware(handler, handler),
-			logging.Middleware(),
+			logging.StructuredMiddleware(),
 		),
 	)
 	if err != nil {
