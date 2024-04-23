@@ -23,7 +23,7 @@ import (
 	"github.com/charmbracelet/log"
 	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
-	"github.com/charmbracelet/wish/activeterm"
+	//"github.com/charmbracelet/wish/activeterm"
 	"github.com/charmbracelet/wish/bubbletea"
 	"github.com/charmbracelet/wish/logging"
 	"github.com/charmbracelet/wish/scp"
@@ -56,8 +56,8 @@ func main() {
 		}),
 		wish.WithSubsystem("sftp", sftpSubsystem(root)),
 		wish.WithMiddleware(
-			bubbletea.Middleware(teaHandler),
-			activeterm.Middleware(), // Bubble Tea apps usually require a PTY. TODO: Find what PTY is
+			//bubbletea.Middleware(teaHandler),
+			//activeterm.Middleware(), // Bubble Tea apps usually require a PTY. TODO: Find what PTY is
 			scp.Middleware(handler, handler),
 			logging.StructuredMiddleware(),
 		),
